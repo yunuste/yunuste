@@ -1,0 +1,7 @@
+- 👋 Hi, I’m @yunuste
+- 👀 I’m interested in pc
+- 🌱 I’m currently learning code and linux
+- 📫 How to reach me sezenyagiz794@gmail.com
+- ⚡ Fun fact game
+-  my project that i developed potato linux
+-  my project that i developed potato de
