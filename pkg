@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+import sys, os, tarfile, shutil, hashlib, subprocess, json
+from pathlib import Path
+
+BASE_DIR = Path("/opt/pkg/app")
+DESKTOP_DIR = Path.home() / ".local/share/applications"
+PKG_DB = Path("/opt/pkg/pkg_db.json")
+IGNORE_FILE = ".pkgignore"
+
+def safe_name(name):
+    return name.replace(" ", "-")
+
+def load_db():
+    if PKG_DB.exists():
+        return json.loads(PKG_DB.read_text())
+    return {}
+
+def save_db(db):
+    PKG_DB.write_text(json.dumps(db, indent=2))
+
+def calc_sha256(file_path):
+    h = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(4096), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def install_pkg(pkg_path):
+    pkg_path = Path(pkg_path)
+    if not pkg_path.exists():
+        print(f"Hata: {pkg_path} bulunamadı.")
+        sys.exit(1)
+
+    with tarfile.open(pkg_path, "r:gz") as tar:
+        tmp_dir = Path("/tmp/pkg_extract")
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
+        tmp_dir.mkdir(parents=True)
+        tar.extractall(tmp_dir)
+
+    with open(tmp_dir / "Name") as f:
+        app_name = f.read().strip()
+    safe_app = safe_name(app_name)
+
+    with open(tmp_dir / "Explanation") as f:
+        explanation = f.read().strip()
+
+    install_dir = BASE_DIR / safe_app
+    if install_dir.exists():
+        shutil.rmtree(install_dir)
+    install_dir.mkdir(parents=True)
+
+    pkg_type = pkg_path.suffix.lower()
+    exec_path = ""
+    if pkg_type == ".pkg":  # AppImage
+        shutil.move(str(tmp_dir / "App.AppImage"), install_dir / "App.AppImage")
+        shutil.move(str(tmp_dir / "Icon.png"), install_dir / "Icon.png")
+        exec_path = str(install_dir / "App.AppImage")
+
+    elif pkg_type == ".jpkg":  # Java
+        shutil.move(str(tmp_dir / "App.jar"), install_dir / "App.jar")
+        shutil.move(str(tmp_dir / "Icon.png"), install_dir / "Icon.png")
+        exec_path = f"java -jar {install_dir}/App.jar"
+
+    elif pkg_type == ".cpkg":  # C / C++ / C#
+        src_file = None
+        for ext in [".c", ".cpp", ".cs"]:
+            files = list(tmp_dir.glob(f"*{ext}"))
+            if files:
+                src_file = files[0]
+                break
+        if not src_file:
+            print("Hata: C/C++/C# kaynak dosyası bulunamadı.")
+            sys.exit(1)
+
+        shutil.move(str(tmp_dir / "Icon.png"), install_dir / "Icon.png")
+        shutil.move(str(src_file), install_dir / src_file.name)
+        shutil.move(str(tmp_dir / "Compilation"), install_dir / "Compilation")
+
+        # Compilation değişkenlerini hazırla
+        comp_cmd = Path(install_dir / "Compilation").read_text()
+        comp_cmd = comp_cmd.replace("!file!", str(install_dir / src_file.name))
+        comp_cmd = comp_cmd.replace("!srcdir!", str(install_dir))
+        comp_cmd = comp_cmd.replace("!out!", str(install_dir / safe_app))
+
+        print(f"[Derleme] {comp_cmd}")
+        subprocess.run(comp_cmd, shell=True, check=True)
+        exec_path = str(install_dir / safe_app)
+
+    # .desktop oluştur
+    DESKTOP_DIR.mkdir(parents=True, exist_ok=True)
+    desktop_file = DESKTOP_DIR / f"{safe_app}.desktop"
+    with open(desktop_file, "w") as f:
+        f.write(f"""[Desktop Entry]
+Type=Application
+Name={app_name}
+Comment={explanation}
+Exec={exec_path}
+Icon={install_dir}/Icon.png
+Terminal=false
+Categories=Utility;
+""")
+
+    shutil.copy(desktop_file, Path.home() / "Desktop")
+
+    # DB güncelle
+    db = load_db()
+    db[safe_app] = {
+        "name": app_name,
+        "type": pkg_type,
+        "path": str(install_dir),
+        "exec": exec_path,
+        "sha256": calc_sha256(pkg_path)
+    }
+    save_db(db)
+
+    shutil.rmtree(tmp_dir)
+    print(f"{app_name} kuruldu.")
+
+def remove_pkg(name):
+    safe_app = safe_name(name)
+    db = load_db()
+    if safe_app not in db:
+        print(f"{name} kurulu değil.")
+        return
+    shutil.rmtree(db[safe_app]["path"], ignore_errors=True)
+    os.remove(DESKTOP_DIR / f"{safe_app}.desktop")
+    db.pop(safe_app)
+    save_db(db)
+    print(f"{name} kaldırıldı.")
+
+def list_pkgs():
+    db = load_db()
+    if not db:
+        print("Hiç paket kurulu değil.")
+        return
+    for k, v in db.items():
+        print(f"{v['name']} ({k}) - {v['type']}")
+
+def upgrade_pkg(pkg_path):
+    sha = calc_sha256(pkg_path)
+    with tarfile.open(pkg_path, "r:gz") as tar:
+        tmp_dir = Path("/tmp/pkg_extract")
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
+        tmp_dir.mkdir(parents=True)
+        tar.extractall(tmp_dir)
+
+    with open(tmp_dir / "Name") as f:
+        app_name = f.read().strip()
+    safe_app = safe_name(app_name)
+
+    db = load_db()
+    if safe_app in db and db[safe_app]["sha256"] == sha:
+        print("Bu paket zaten güncel.")
+        shutil.rmtree(tmp_dir)
+        return
+
+    print(f"{app_name} güncelleniyor...")
+    install_pkg(pkg_path)
+
+def build_pkg(source_dir, output_file):
+    source_dir = Path(source_dir)
+    if not source_dir.exists():
+        print("Kaynak klasör bulunamadı.")
+        return
+
+    ignore_list = []
+    ignore_file = source_dir / IGNORE_FILE
+    if ignore_file.exists():
+        ignore_list = [line.strip() for line in ignore_file.read_text().splitlines() if line.strip()]
+
+    with tarfile.open(output_file, "w:gz") as tar:
+        for root, dirs, files in os.walk(source_dir):
+            for file in files:
+                rel_path = os.path.relpath(os.path.join(root, file), source_dir)
+                if rel_path in ignore_list:
+                    continue
+                tar.add(os.path.join(root, file), arcname=file)
+
+    print(f"{output_file} oluşturuldu.")
+
+def main():
+    if len(sys.argv) < 2:
+        print("Kullanım:\n"
+              "  pkg install <paket>\n"
+              "  pkg remove <isim>\n"
+              "  pkg list\n"
+              "  pkg upgrade <paket>\n"
+              "  pkg build <klasör> <çıktı.pkg>")
+        sys.exit(1)
+
+    cmd = sys.argv[1]
+    if cmd == "install":
+        install_pkg(sys.argv[2])
+    elif cmd == "remove":
+        remove_pkg(sys.argv[2])
+    elif cmd == "list":
+        list_pkgs()
+    elif cmd == "upgrade":
+        upgrade_pkg(sys.argv[2])
+    elif cmd == "build":
+        build_pkg(sys.argv[2], sys.argv[3])
+    else:
+        print(f"Bilinmeyen komut: {cmd}")
+
+if __name__ == "__main__":
+    main()
