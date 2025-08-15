@@ -16,6 +16,7 @@ def load_db():
     return {}
 
 def save_db(db):
+    PKG_DB.parent.mkdir(parents=True, exist_ok=True)
     PKG_DB.write_text(json.dumps(db, indent=2))
 
 def calc_sha256(file_path):
@@ -24,6 +25,28 @@ def calc_sha256(file_path):
         for chunk in iter(lambda: f.read(4096), b""):
             h.update(chunk)
     return h.hexdigest()
+
+def create_desktop_entry(app_name, safe_app, exec_path, icon_path, explanation):
+    DESKTOP_DIR.mkdir(parents=True, exist_ok=True)
+    desktop_file = DESKTOP_DIR / f"{safe_app}.desktop"
+    desktop_content = f"""[Desktop Entry]
+Type=Application
+Name={app_name}
+Comment={explanation}
+Exec={exec_path}
+Icon={icon_path}
+Terminal=false
+Categories=Utility;
+"""
+    desktop_file.write_text(desktop_content)
+    desktop_file.chmod(0o755)  # çalıştırılabilir yap
+
+    # Masaüstüne kopyala
+    user_desktop_dir = Path.home() / "Desktop"
+    user_desktop_dir.mkdir(parents=True, exist_ok=True)
+    user_desktop = user_desktop_dir / f"{safe_app}.desktop"
+    shutil.copy(desktop_file, user_desktop)
+    user_desktop.chmod(0o755)
 
 def install_pkg(pkg_path):
     pkg_path = Path(pkg_path)
@@ -48,7 +71,7 @@ def install_pkg(pkg_path):
     install_dir = BASE_DIR / safe_app
     if install_dir.exists():
         shutil.rmtree(install_dir)
-    install_dir.mkdir(parents=True)
+    install_dir.mkdir(parents=True, exist_ok=True)
 
     pkg_type = pkg_path.suffix.lower()
     exec_path = ""
@@ -77,7 +100,6 @@ def install_pkg(pkg_path):
         shutil.move(str(src_file), install_dir / src_file.name)
         shutil.move(str(tmp_dir / "Compilation"), install_dir / "Compilation")
 
-        # Compilation değişkenlerini hazırla
         comp_cmd = Path(install_dir / "Compilation").read_text()
         comp_cmd = comp_cmd.replace("!file!", str(install_dir / src_file.name))
         comp_cmd = comp_cmd.replace("!srcdir!", str(install_dir))
@@ -87,21 +109,8 @@ def install_pkg(pkg_path):
         subprocess.run(comp_cmd, shell=True, check=True)
         exec_path = str(install_dir / safe_app)
 
-    # .desktop oluştur
-    DESKTOP_DIR.mkdir(parents=True, exist_ok=True)
-    desktop_file = DESKTOP_DIR / f"{safe_app}.desktop"
-    with open(desktop_file, "w") as f:
-        f.write(f"""[Desktop Entry]
-Type=Application
-Name={app_name}
-Comment={explanation}
-Exec={exec_path}
-Icon={install_dir}/Icon.png
-Terminal=false
-Categories=Utility;
-""")
-
-    shutil.copy(desktop_file, Path.home() / "Desktop")
+    # Masaüstü ve Başlat Menüsü için .desktop dosyası oluştur
+    create_desktop_entry(app_name, safe_app, exec_path, str(install_dir / "Icon.png"), explanation)
 
     # DB güncelle
     db = load_db()
@@ -124,7 +133,12 @@ def remove_pkg(name):
         print(f"{name} kurulu değil.")
         return
     shutil.rmtree(db[safe_app]["path"], ignore_errors=True)
-    os.remove(DESKTOP_DIR / f"{safe_app}.desktop")
+    desktop_file = DESKTOP_DIR / f"{safe_app}.desktop"
+    if desktop_file.exists():
+        desktop_file.unlink()
+    desktop_file_on_desktop = Path.home() / "Desktop" / f"{safe_app}.desktop"
+    if desktop_file_on_desktop.exists():
+        desktop_file_on_desktop.unlink()
     db.pop(safe_app)
     save_db(db)
     print(f"{name} kaldırıldı.")
